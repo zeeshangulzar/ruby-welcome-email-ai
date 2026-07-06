@@ -1,6 +1,6 @@
 # ruby-welcome-email-ai
 
-A Ruby on Rails demo showing how to send an **AI-personalized welcome email** on SaaS signup using the **Mailtrap Email API** with a template hosted in the Mailtrap dashboard.
+A Ruby on Rails demo showing how to send an **AI-personalized welcome email** on SaaS signup using the **Mailtrap Email API** with a template hosted in the Mailtrap dashboard. The same app can route through **Mailtrap Sandbox** for previewing AI-generated copy in development or through the Mailtrap production endpoint for real delivery — the switch is a single env var (`MAILTRAP_ENV`), no code change.
 
 On signup, the app captures the user's `name`, `email`, `role`, `company_size`, and `use_case`. `WelcomeEmailGenerator` calls the [Anthropic API](https://docs.anthropic.com/en/api/getting-started) to generate a personalized `{headline, body, cta_text}` payload, which is passed to the Mailtrap template as variables. The email HTML lives in Mailtrap, not in `app/views`.
 
@@ -9,6 +9,7 @@ On signup, the app captures the user's `name`, `email`, `role`, `company_size`, 
 - Signup form at `/signup` collecting profile fields used for personalization
 - Anthropic Claude generates a role-aware `{headline, body, cta_text}` for each user
 - Email is delivered via `Mailtrap::Mail::FromTemplate` (Email API) with a template UUID and variables map
+- **Sandbox / production switching is config-only** — set `MAILTRAP_ENV=sandbox` to route to a safe Mailtrap Sandbox inbox, `MAILTRAP_ENV=production` to send real emails
 - Graceful degradation — if the Anthropic API is unavailable, the app falls back to a generic welcome copy
 - Mail delivery failures are logged and the user's `welcome_email_status` records `sent`/`failed`
 - All signups persisted to the database with input validation and duplicate-email protection
@@ -25,6 +26,13 @@ Browser ─► POST /signup ─► SignupsController
                                 │
                                 └── WelcomeMailer.deliver ─► Mailtrap Email API
                                                              (template_uuid + variables)
+                                                                      │
+                                                     MAILTRAP_ENV ─── │
+                                                                      │
+                                                  ┌───────────────────┴──────────────────┐
+                                                  ▼                                      ▼
+                                        Mailtrap Sandbox                        Mailtrap production
+                                        (safe test inbox)                       (real delivery)
 ```
 
 ## Requirements
@@ -52,25 +60,54 @@ rails server
 
 Open `http://localhost:3000` in your browser.
 
-### Mailtrap setup
+### Mailtrap setup — one token, two modes
 
-1. Sign in to [Mailtrap](https://mailtrap.io) → **Domains** and either verify your own sending domain or use the pre-created **`demomailtrap.co`** demo domain (delivery only to your Mailtrap account email)
-2. Go to **Settings** → **API Tokens** → **Add API Token** and give it the **Admin** permission on your domain — put the token into `.env` as `MAILTRAP_API_TOKEN`
-3. Go to **Templates** → **New Template** and create an HTML template with these placeholders:
-   - `{{user_name}}`
-   - `{{headline}}` — AI-generated subject/heading line
-   - `{{body}}` — AI-generated 2–3 sentence body
-   - `{{cta_text}}` — AI-generated CTA button label
-   - `{{cta_url}}` — the target URL for the CTA button
-4. Copy the **Template UUID** into `.env` as `MAILTRAP_WELCOME_TEMPLATE_UUID`
-5. Set `MAILTRAP_FROM_EMAIL` to a sender on your verified domain (e.g. `hello@demomailtrap.co`)
+**1. Create the template (used by both modes)**
+
+Go to Mailtrap → **Templates** → **New Template**, category `Transactional`, and paste HTML that references these variables:
+
+- `{{user_name}}`
+- `{{headline}}` — AI-generated subject/heading line
+- `{{body}}` — AI-generated 2–3 sentence body
+- `{{cta_text}}` — AI-generated CTA button label
+- `{{cta_url}}` — the target URL for the CTA button
+
+Copy the **Template UUID** into `.env` as `MAILTRAP_WELCOME_TEMPLATE_UUID`.
+
+**2. Create an API token**
+
+Mailtrap → **Settings** → **API Tokens** → **Add API Token** with the **Admin** scope. Put it into `.env` as `MAILTRAP_API_TOKEN`.
+
+**3a. Sandbox mode (recommended for development)**
+
+Mailtrap → **Sandboxes** → open a project inbox → **SMTP/API Integrations** → copy the numeric **Inbox ID**. Set:
+
+```env
+MAILTRAP_ENV=sandbox
+MAILTRAP_SANDBOX_INBOX_ID=<the numeric id>
+```
+
+Emails now land in the Sandbox inbox instead of a real recipient — perfect for iterating on the AI-generated copy.
+
+**3b. Production mode (real delivery)**
+
+Mailtrap → **Domains** → verify your own sending domain, or use the pre-created **`demomailtrap.co`** demo domain (only delivers to your Mailtrap account owner email). Set:
+
+```env
+MAILTRAP_ENV=production
+MAILTRAP_FROM_EMAIL=hello@demomailtrap.co
+```
+
+Restart `rails server` after changing `.env`. No code change is needed to switch between modes.
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `MAILTRAP_API_TOKEN` | Mailtrap API token with sending permission on your domain |
-| `MAILTRAP_FROM_EMAIL` | Verified sender address (e.g. `hello@demomailtrap.co`) |
+| `MAILTRAP_API_TOKEN` | Mailtrap API token (Admin scope) |
+| `MAILTRAP_ENV` | `sandbox` (dev) or `production` (real delivery) |
+| `MAILTRAP_SANDBOX_INBOX_ID` | Sandbox inbox numeric ID — required when `MAILTRAP_ENV=sandbox` |
+| `MAILTRAP_FROM_EMAIL` | Verified sender address (e.g. `hello@demomailtrap.co`) — used in production mode |
 | `MAILTRAP_WELCOME_TEMPLATE_UUID` | UUID of the welcome template in Mailtrap → Templates |
 | `APP_DASHBOARD_URL` | URL used in the welcome email's CTA button (optional) |
 | `ANTHROPIC_API_KEY` | API key from [console.anthropic.com](https://console.anthropic.com) → API Keys |
@@ -99,7 +136,7 @@ Open `http://localhost:3000` in your browser.
 
 ## Mailtrap Integration
 
-The welcome email HTML lives in the Mailtrap dashboard, not in `app/views`. The app calls the Email API with a template UUID and a variables map:
+The welcome email HTML lives in the Mailtrap dashboard, not in `app/views`. The app calls the Email API with a template UUID and a variables map. The same code path handles both Sandbox and production — only the client instantiation differs, and it's driven entirely by `MAILTRAP_ENV`:
 
 ```ruby
 # app/services/welcome_mailer.rb
@@ -116,7 +153,18 @@ mail = Mailtrap::Mail::FromTemplate.new(
   }
 )
 
-Mailtrap::Client.new(api_key: ENV.fetch("MAILTRAP_API_TOKEN")).send(mail)
+client =
+  if ENV["MAILTRAP_ENV"].to_s.downcase == "sandbox"
+    Mailtrap::Client.new(
+      api_key:  ENV.fetch("MAILTRAP_API_TOKEN"),
+      sandbox:  true,
+      inbox_id: ENV.fetch("MAILTRAP_SANDBOX_INBOX_ID")
+    )
+  else
+    Mailtrap::Client.new(api_key: ENV.fetch("MAILTRAP_API_TOKEN"))
+  end
+
+client.send(mail)
 ```
 
 ## Running Tests

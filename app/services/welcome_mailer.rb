@@ -27,7 +27,21 @@ class WelcomeMailer
 
   private
 
+  # Chooses between Sandbox (safe test inbox, no real delivery) and production
+  # sending purely from ENV — no code change needed to flip modes.
   def client
-    @client ||= Mailtrap::Client.new(api_key: ENV.fetch("MAILTRAP_API_TOKEN"))
+    if sandbox_mode?
+      Mailtrap::Client.new(
+        api_key:  ENV.fetch("MAILTRAP_API_TOKEN"),
+        sandbox:  true,
+        inbox_id: ENV.fetch("MAILTRAP_SANDBOX_INBOX_ID")
+      )
+    else
+      Mailtrap::Client.new(api_key: ENV.fetch("MAILTRAP_API_TOKEN"))
+    end
+  end
+
+  def sandbox_mode?
+    ENV["MAILTRAP_ENV"].to_s.strip.downcase == "sandbox"
   end
 end
